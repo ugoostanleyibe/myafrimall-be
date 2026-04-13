@@ -1,9 +1,11 @@
 import { authenticate, AuthRequest } from "../middleware/auth";
 import { body, validationResult } from "express-validator";
+import { sendPasswordResetEmail } from "../utils/mail";
 import { Request, Response, Router } from "express";
 import { User } from "../models/User";
 import { config } from "../config";
 import jwt from "jsonwebtoken";
+import crypto from "crypto";
 
 const router = Router();
 
@@ -41,6 +43,7 @@ router.post(
   ],
   async (req: Request, res: Response): Promise<void> => {
     const errors = validationResult(req);
+
     if (!errors.isEmpty()) {
       res.status(400).json({ message: errors.array()[0].msg });
       return;
@@ -143,6 +146,113 @@ router.post(
 router.get("/me", authenticate, (req: AuthRequest, res: Response) => {
   res.json({ user: req.user?.toJSON() });
 });
+
+// POST /api/auth/forgot-password
+router.post(
+  "/forgot-password",
+  [
+    body("email")
+      .trim()
+      .isEmail()
+      .withMessage("Please enter a valid email")
+      .normalizeEmail(),
+  ],
+  async (req: Request, res: Response): Promise<void> => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ message: errors.array()[0].msg });
+      return;
+    }
+
+    const { email } = req.body;
+
+    try {
+      const user = await User.findOne({ email });
+
+      // Always return success to avoid revealing whether the email exists
+      if (!user) {
+        res.json({
+          message:
+            "If an account with that email exists, a password reset link has been sent.",
+        });
+        return;
+      }
+
+      const resetToken = crypto.randomBytes(32).toString("hex");
+      const resetTokenHash = crypto
+        .createHash("sha256")
+        .update(resetToken)
+        .digest("hex");
+
+      user.resetPasswordExpires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+      user.resetPasswordToken = resetTokenHash;
+
+      await user.save();
+
+      const resetUrl = `${config.clientUrl}/reset-password?token=${resetToken}`;
+
+      try {
+        await sendPasswordResetEmail(user.firstName, resetUrl, user.email);
+      } catch (mailError) {
+        console.error("Failed to send reset email:", mailError);
+      }
+
+      res.json({
+        message:
+          "If an account with that email exists, a password reset link has been sent.",
+      });
+    } catch (error) {
+      console.error("Forgot password error:", error);
+      res.status(500).json({ message: "Server error. Please try again." });
+    }
+  },
+);
+
+// POST /api/auth/reset-password
+router.post(
+  "/reset-password",
+  [
+    body("token").notEmpty().withMessage("Reset token is required"),
+    body("password")
+      .isLength({ min: 6 })
+      .withMessage("Password must be at least 6 characters"),
+  ],
+  async (req: Request, res: Response): Promise<void> => {
+    const errors = validationResult(req);
+
+    if (!errors.isEmpty()) {
+      res.status(400).json({ message: errors.array()[0].msg });
+      return;
+    }
+
+    const { token, password } = req.body;
+
+    try {
+      const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+
+      const user = await User.findOne({
+        resetPasswordToken: tokenHash,
+        resetPasswordExpires: { $gt: new Date() },
+      });
+
+      if (!user) {
+        res.status(400).json({ message: "Invalid or expired reset token" });
+        return;
+      }
+
+      user.resetPasswordExpires = undefined;
+      user.resetPasswordToken = undefined;
+      user.password = password;
+
+      await user.save();
+
+      res.json({ message: "Password has been reset successfully" });
+    } catch (error) {
+      console.error("Reset password error:", error);
+      res.status(500).json({ message: "Server error. Please try again." });
+    }
+  },
+);
 
 // POST /api/auth/logout
 router.post("/logout", (_req: Request, res: Response) => {
