@@ -15,6 +15,7 @@ app.use(
     origin: [
       "http://localhost:4096",
       "http://127.0.0.1:4096",
+      "https://myafrimall.vercel.app/",
       config.clientUrl,
     ],
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
